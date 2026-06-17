@@ -1,0 +1,109 @@
+name: Build Kareem_T01_Setup.exe
+
+# Build the production Windows installer entirely in the cloud.
+# No Python / PyInstaller / Inno Setup needed on your own PC.
+# Trigger: push to main, or run manually from the Actions tab.
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # 1) Get the source
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2) Python on the runner (only used to BUILD; the app ships without Python)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3) Python build + runtime dependencies
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller fastapi "uvicorn[standard]" python-multipart PyMuPDF pytesseract Pillow openpyxl numpy pywin32
+
+      # 4) Route B — download the REAL Tesseract engine (+DLLs) via Chocolatey,
+      #    then copy it into the bundled folder ocr\tesseract\
+      - name: Install Tesseract engine (Chocolatey)
+        shell: pwsh
+        run: |
+          choco install tesseract --no-progress -y
+          $src = "C:\Program Files\Tesseract-OCR"
+          if (-not (Test-Path "$src\tesseract.exe")) { throw "Tesseract engine not found after choco install." }
+          $ocr = "$env:GITHUB_WORKSPACE\ocr\tesseract"
+          New-Item -ItemType Directory -Force -Path "$ocr\tessdata" | Out-Null
+          Write-Host "Copying engine + DLLs from $src"
+          Copy-Item "$src\tesseract.exe" $ocr -Force
+          Get-ChildItem "$src" -Filter *.dll | ForEach-Object { Copy-Item $_.FullName $ocr -Force }
+          # leptonica / other DLLs sometimes sit in subfolders
+          Get-ChildItem "$src" -Recurse -Filter *.dll | ForEach-Object {
+            $d = Join-Path $ocr $_.Name; if (-not (Test-Path $d)) { Copy-Item $_.FullName $d -Force }
+          }
+
+      # 5) Download eng / ara / fra traineddata (official tessdata_best)
+      - name: Download language data (eng, ara, fra)
+        shell: pwsh
+        run: |
+          $base = "https://github.com/tesseract-ocr/tessdata_best/raw/main/"
+          $td = "$env:GITHUB_WORKSPACE\ocr\tesseract\tessdata"
+          foreach ($l in "eng","ara","fra") {
+            Write-Host "Downloading $l.traineddata"
+            Invoke-WebRequest -Uri ($base + "$l.traineddata") -OutFile (Join-Path $td "$l.traineddata")
+          }
+
+      # 6) HARD GATE — fail the workflow clearly if any OCR file is missing
+      - name: Verify bundled OCR (fail if missing)
+        shell: pwsh
+        run: |
+          $ocr = "$env:GITHUB_WORKSPACE\ocr\tesseract"
+          $required = @(
+            "$ocr\tesseract.exe",
+            "$ocr\tessdata\eng.traineddata",
+            "$ocr\tessdata\ara.traineddata",
+            "$ocr\tessdata\fra.traineddata"
+          )
+          $missing = $required | Where-Object { -not (Test-Path $_) }
+          $dllCount = (Get-ChildItem $ocr -Filter *.dll -ErrorAction SilentlyContinue).Count
+          if ($dllCount -lt 1) { $missing += "$ocr\*.dll (no DLLs found)" }
+          if ($missing.Count -gt 0) {
+            Write-Host "::error::OCR bundle incomplete. Missing:`n$($missing -join "`n")"
+            exit 1
+          }
+          Write-Host "OCR bundle verified: tesseract.exe + $dllCount DLL(s) + eng/ara/fra."
+
+      # 7) Use the packaged config that FORCES bundled OCR (no system fallback)
+      - name: Apply packaged config (ocr_force_bundled = true)
+        shell: pwsh
+        run: Copy-Item "packaging\config.packaged.json" "config.json" -Force
+
+      # 8) PyInstaller -> dist\KareemT01\KareemT01.exe
+      - name: Build KareemT01.exe (PyInstaller)
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm packaging\KareemT01.spec
+          if (-not (Test-Path "dist\KareemT01\KareemT01.exe")) { throw "PyInstaller did not produce KareemT01.exe" }
+
+      # 9) Inno Setup -> packaging\Output\Kareem_T01_Setup.exe
+      - name: Compile installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          & $iscc "packaging\KareemT01.iss"
+          if (-not (Test-Path "packaging\Output\Kareem_T01_Setup.exe")) { throw "Inno Setup did not produce the installer." }
+
+      # 10) Upload the installer as a downloadable artifact
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kareem_T01_Setup
+          path: packaging/Output/Kareem_T01_Setup.exe
+          if-no-files-found: error

@@ -90,7 +90,14 @@ def resolve_ocr(cfg=None):
 def configure_pytesseract(cfg=None):
     """
     Point pytesseract at the resolved executable and tessdata folder.
-    Returns the resolution dict. Sets TESSDATA_PREFIX so bundled traineddata is found.
+
+    IMPORTANT: pytesseract builds the command line by splitting the `config` string
+    on whitespace, so passing  --tessdata-dir "C:\\path with spaces"  there breaks:
+    the literal quote characters get glued onto the path. The robust fix is to set
+    TESSDATA_PREFIX in the process environment (no quoting issues, spaces handled by
+    the OS) and NOT pass a quoted --tessdata-dir in the config string.
+
+    Tesseract 4/5 expect TESSDATA_PREFIX to be the tessdata directory ITSELF.
     """
     res = resolve_ocr(cfg)
     if res["exe"]:
@@ -99,23 +106,26 @@ def configure_pytesseract(cfg=None):
             pytesseract.pytesseract.tesseract_cmd = res["exe"]
         except Exception:
             pass
-    # tessdata: pass via --tessdata-dir at call time AND env var as a safety net
-    if res["tessdata"] and os.path.isdir(res["tessdata"]):
-        os.environ["TESSDATA_PREFIX"] = os.path.dirname(res["tessdata"]) \
-            if os.path.basename(res["tessdata"]) == "tessdata" else res["tessdata"]
+    td = res["tessdata"]
+    if td and os.path.isdir(td):
+        # Point at the tessdata folder itself (correct for Tesseract 4 & 5).
+        os.environ["TESSDATA_PREFIX"] = td
     return res
 
 
 def tess_config(cfg=None, extra=""):
-    """Build a --tessdata-dir config string so the BUNDLED tessdata is preferred."""
-    res = resolve_ocr(cfg)
-    parts = []
-    if res["tessdata"] and os.path.isdir(res["tessdata"]):
-        # quote for safety on Windows paths with spaces
-        parts.append('--tessdata-dir "%s"' % res["tessdata"])
-    if extra:
-        parts.append(extra)
-    return " ".join(parts)
+    """
+    Build the pytesseract `config` string. We deliberately DO NOT put --tessdata-dir
+    here (it would be whitespace-split and the quotes mangled). The tessdata folder is
+    provided via the TESSDATA_PREFIX environment variable set in configure_pytesseract().
+    Only safe, space-free flags (e.g. --psm 6) go in the config string.
+    """
+    return extra or ""
+
+
+def _td_dir(cfg=None):
+    """Return the resolved tessdata directory (the folder itself)."""
+    return resolve_ocr(cfg).get("tessdata")
 
 
 # ----------------------------------------------------------------------------
@@ -164,7 +174,29 @@ def health_check(cfg=None):
                   "status": "Passed" if cmd_ok else "Failed",
                   "detail": cmd_detail})
 
-    critical_ok = exe_ok and td_ok and cmd_ok and all(
+    # Languages actually LOADABLE: run `tesseract --list-langs` with TESSDATA_PREFIX
+    # set to the bundled tessdata folder. This catches path/quoting problems that a
+    # plain file-existence check would miss.
+    langs_ok = False; langs_detail = "not run"
+    listed = set()
+    if exe_ok and td_ok:
+        try:
+            env = dict(os.environ); env["TESSDATA_PREFIX"] = td
+            out = subprocess.run([res["exe"], "--list-langs"],
+                                 capture_output=True, text=True, timeout=30, env=env)
+            blob = (out.stdout or "") + "\n" + (out.stderr or "")
+            listed = {ln.strip() for ln in blob.splitlines() if ln.strip() and " " not in ln.strip()}
+            need = {"eng", "ara", "fra"}
+            langs_ok = need.issubset(listed)
+            langs_detail = "loadable: " + ", ".join(sorted(listed & need)) + \
+                           ("" if langs_ok else " (missing: %s)" % ", ".join(sorted(need - listed)))
+        except Exception as e:
+            langs_detail = "error: %s" % e
+    items.append({"check": "Languages loadable (eng, ara, fra)",
+                  "status": "Passed" if langs_ok else "Failed",
+                  "detail": langs_detail})
+
+    critical_ok = exe_ok and td_ok and cmd_ok and langs_ok and all(
         os.path.exists(os.path.join(td, f)) for f in LANG_FILES.values()) if td_ok else False
     return {"ok": bool(critical_ok), "source": res["source"], "exe": res["exe"],
             "tessdata": td, "items": items}

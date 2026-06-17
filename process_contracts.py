@@ -93,15 +93,62 @@ def ncode(c):
     sub = [p.zfill(2) if p.isdigit() else p for p in ps[1:]]
     return "-".join([b] + sub) if sub else b
 
+# Accepted filename examples shown to the user when parsing fails (no AI; deterministic).
+PARSE_EXAMPLES = (
+    "107-59659.pdf | 98-60033.pdf | "
+    "72-49835 Annex(1).pdf | 78-48033 Annex (2).pdf | "
+    "099-02-26700 Annex (1).pdf | CON-01-57697.pdf | "
+    "099-02-26700 [3-4].pdf | 099-02-26700 Annex(1) [3-4].pdf"
+)
+
+def annex_label(n):
+    """Normalise annex number to the canonical display form 'Annex (N)'."""
+    return "Annex (%d)" % n if n else ""
+
 def parse_bundle_name(fn):
+    """
+    Deterministic, AI-free bundle-name parser. Tolerant of spacing/case.
+
+    Layout:  <projectCode>-<contractNo>[ Annex(N) | Annex (N)] [ [s-e] ]
+      * projectCode = digits, optional '-NN' sub-project, or letter codes (CON-01, N-Store)
+      * contractNo  = the LAST run of 3-6 digits that belongs to the code
+      * Annex / addendum number optional, any case, with or without a space before '('
+      * manual page range [s-e] optional
+    Returns dict(code, no, annex, manual) or None if it cannot be parsed.
+    """
+    if not fn:
+        return None
+    name = os.path.splitext(str(fn))[0]          # ignore extension
+    name = re.sub(r"\s+", " ", name).strip()      # trim / collapse spaces
+
+    # 1) manual page range [s-e]  (also tolerates [s - e])
+    manual = None
+    mr = re.search(r"\[\s*(\d+)\s*-\s*(\d+)\s*\]", name)
+    if mr:
+        manual = (int(mr.group(1)), int(mr.group(2)))
+    core = re.sub(r"\[\s*\d+\s*-\s*\d+\s*\]", " ", name)   # strip range token
+
+    # 2) annex / addendum number  (Annex(1), Annex (1), ANNEX1, addendum 2, ...)
     annex = None
-    ma = re.search(r"Annex\s*\(?\s*(\d+)\s*\)?", fn, re.I)
-    if ma: annex = int(ma.group(1))
-    m = re.match(r"\s*(.+?)[-_ ]([0-9]{3,6})(?![0-9])", fn)
-    if not m: return None
-    mr = re.search(r"\[(\d+)\s*-\s*(\d+)\]", fn)
-    manual = (int(mr.group(1)), int(mr.group(2))) if mr else None
-    return dict(code=ncode(m.group(1)), no=m.group(2), annex=annex, manual=manual)
+    ma = re.search(r"\b(?:annex|addendum)\b\s*\(?\s*(\d+)\s*\)?", core, re.I)
+    if ma:
+        annex = int(ma.group(1))
+    core = re.sub(r"\b(?:annex|addendum)\b\s*\(?\s*\d*\s*\)?", " ", core, flags=re.I)
+    core = re.sub(r"\s+", " ", core).strip(" -_")
+
+    # 3) split <code>-<contractNo>: contractNo is the LAST 3-6 digit group.
+    #    Everything before the final '-<digits>' is the project code.
+    m = re.match(r"^(?P<code>.+?)[-_ ]+(?P<no>\d{3,6})$", core)
+    if not m:
+        # also accept a bare 'code no' with a space separator
+        m = re.match(r"^(?P<code>.+?)\s+(?P<no>\d{3,6})$", core)
+    if not m:
+        return None
+    code_raw = m.group("code").strip(" -_")
+    no = m.group("no")
+    if not code_raw:
+        return None
+    return dict(code=ncode(code_raw), no=no, annex=annex, manual=manual)
 
 _fitz = None
 def get_fitz():
@@ -512,15 +559,25 @@ def process_one(pdf_path, lang=None, manual_agreement_date="", manual_sr_number=
     lang = lang or CFG["ocr_default_language"]
     result = {"file": fn, "status": "failed", "msg": "", "confidence": None,
               "missing": [], "warnings": [], "output_pdf": "", "eml": "",
-              "sr_added": False, "review_reason": ""}
+              "sr_added": False, "review_reason": "",
+              # filename pre-processing preview (deterministic, no AI):
+              "parsed": {"original": os.path.basename(pdf_path), "code": "", "no": "",
+                         "annex": None, "type": "", "status": "Needs Manual Review"}}
 
     meta = parse_bundle_name(fn)
     if not meta:
+        result["parsed"]["status"] = "Needs Manual Review"
         result.update(status="manual",
-                      review_reason="Filename not understood (need: code-contractNo [Annex(N)]).",
-                      msg="اسم الملف غير مفهوم (المطلوب: كود-رقمالعقد [Annex(N)])")
+                      review_reason=("Filename not understood. Accepted examples: " + PARSE_EXAMPLES),
+                      msg="اسم الملف غير مفهوم. أمثلة مقبولة: " + PARSE_EXAMPLES)
         audit({"file": fn, "status": "manual", "manual_review_reason": result["review_reason"]})
         return result
+
+    # populate the parse preview now that the filename is understood
+    result["parsed"].update(
+        code=meta["code"], no=meta["no"], annex=meta["annex"],
+        type=("Addendum %d" % meta["annex"] if meta["annex"] else "Contract"),
+        status="Parsed")
 
     # OCR + confidence
     try:

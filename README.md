@@ -269,3 +269,45 @@ Python, PyInstaller, or Inno Setup yourself.
 Then double-click `Kareem_T01_Setup.exe` on any target PC — it installs to
 `%LocalAppData%\EDECS\Kareem T-01\`, needs no admin and no Python, bundles OCR, makes Desktop +
 Start Menu shortcuts, and opens `http://127.0.0.1:8000/`.
+
+---
+
+## 14. Fix log — v1.0.1 (OCR tessdata path)
+
+**Symptom (v1.0.0):** Health Check passed but OCR Confidence Test failed with
+`Error opening data file "...\tessdata"/ara.traineddata — Tesseract couldn't load any languages`.
+
+**Cause:** `pytesseract` splits the `config` string on whitespace, so a quoted
+`--tessdata-dir "C:\...\tessdata"` had its literal quotes glued onto the path on Windows.
+
+**Fix (`ocr_engine.py`):**
+- `tess_config()` no longer emits `--tessdata-dir` (only safe flags like `--psm 6`).
+- `configure_pytesseract()` sets `TESSDATA_PREFIX` to the **tessdata folder itself** (correct for
+  Tesseract 4 & 5), so the subprocess finds languages with no quoting issues and spaces handled by the OS.
+- `health_check()` now also runs `tesseract --list-langs` with `TESSDATA_PREFIX` set and confirms
+  **eng, ara, fra are actually loadable** (a new "Languages loadable (eng, ara, fra)" row), not merely present.
+- `ocr_force_bundled` stays `true`; no system fallback.
+
+Verified on an install path containing a space: OCR Confidence Test returns a percentage (no
+language-loading error) and a full bundle processes end-to-end.
+
+---
+
+## 15. Fix log — v1.0.2 (deterministic filename parser + parse preview)
+
+**Parser rewrite (`process_contracts.py`, no AI / no network):**
+- Contract number = the **last** 3–6 digit group before Annex/manual-range/end; everything before it
+  is the project code. Fixes sub-project codes (`099-02-26700` → code `99-02`, no `26700`).
+- Accepts `Annex(1)` and `Annex (1)`, any case, extra spaces, the word `addendum`, and missing extension.
+- Extracts the annex number and normalises display to **`Annex (N)`**; type becomes `Addendum N`.
+- Supports letter codes (`CON-01`) and manual page range `[s-e]` (alone or with an annex).
+- On failure → **Manual Review** with a clear reason listing accepted examples (`PARSE_EXAMPLES`).
+
+**UI preprocessing preview (Process screen table):** Original filename, Code, No., Annex, Type
+(Contract/Addendum N), and Parse status (✓ Parsed / ⚑ Manual Review) — shown immediately on scan
+via the new `/api/parse_preview` endpoint, before any OCR runs.
+
+**Tests:** `test_filename_parser.py` covers all real examples + tolerance + rejection cases
+(25 checks). Run: `python test_filename_parser.py`.
+
+The v1.0.1 OCR tessdata fix is retained unchanged.

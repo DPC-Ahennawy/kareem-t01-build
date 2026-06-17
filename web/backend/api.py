@@ -48,6 +48,26 @@ def inbox():
             "output": pc.OUTPUT, "languages": list(ocr.LANGUAGE_OPTIONS.keys()),
             "default_language": pc.CFG.get("ocr_default_language", ocr.DEFAULT_LANGUAGE)}
 
+@app.get("/api/parse_preview")
+def parse_preview():
+    """Deterministic filename pre-processing for every PDF in the Inbox (no OCR, no AI)."""
+    _ensure_dirs()
+    rows = []
+    for f in sorted(glob.glob(os.path.join(pc.INBOX, "*.pdf"))):
+        base = os.path.basename(f)
+        meta = pc.parse_bundle_name(os.path.splitext(base)[0])
+        if meta:
+            rows.append({"original": base, "code": meta["code"], "no": meta["no"],
+                         "annex": meta["annex"],
+                         "type": ("Addendum %d" % meta["annex"] if meta["annex"] else "Contract"),
+                         "annex_label": pc.annex_label(meta["annex"]),
+                         "status": "Parsed"})
+        else:
+            rows.append({"original": base, "code": "", "no": "", "annex": None,
+                         "type": "", "annex_label": "", "status": "Needs Manual Review"})
+    return {"rows": rows, "examples": pc.PARSE_EXAMPLES}
+
+
 @app.post("/api/upload")
 async def upload(files: list[UploadFile] = File(...)):
     _ensure_dirs()

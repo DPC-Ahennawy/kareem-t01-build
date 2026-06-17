@@ -2,7 +2,7 @@
 ; Produces Kareem_T01_Setup.exe. Installs PER-USER to LocalAppData (no admin, writable).
 #define AppName "Kareem T-01"
 #define AppPub  "DPC Department - EDECS_EGY"
-#define AppVer  "1.0.0"
+#define AppVer  "1.0.2"
 
 [Setup]
 AppName={#AppName}

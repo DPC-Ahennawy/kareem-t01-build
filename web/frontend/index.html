@@ -90,7 +90,8 @@
       </div>
 
       <table><thead><tr>
-        <th>File</th><th>Status</th><th>OCR Conf.</th><th>Agreement Date</th><th>SR Number</th><th>Notes</th>
+        <th>File</th><th>Code</th><th>No.</th><th>Annex</th><th>Type</th><th>Parse</th>
+        <th>Status</th><th>OCR&nbsp;Conf.</th><th>Agr.&nbsp;Date</th><th>SR&nbsp;No.</th><th>Notes</th>
       </tr></thead><tbody id="tbl"></tbody></table>
 
       <div class="row" style="margin:16px 0">
@@ -203,8 +204,20 @@ async function scan(){
   if(!LANGS.length){LANGS=r.languages;
     $('lang').innerHTML=LANGS.map(l=>`<option ${l===r.default_language||(l==='Arabic + English'&&r.default_language==='ara+eng')?'selected':''}>${l}</option>`).join('');}
   $('c_in').textContent=r.count;
-  $('tbl').innerHTML=r.files.map(f=>`<tr data-f="${f}"><td>${f}</td><td class="muted">— waiting</td><td>—</td><td>—</td><td>—</td><td></td></tr>`).join('')
-     ||'<tr><td colspan=6 class="muted">Inbox is empty — upload PDFs above.</td></tr>';
+  const pp=await fetch('/api/parse_preview').then(x=>x.json());
+  $('tbl').innerHTML=(pp.rows||[]).map(p=>{
+    const parsed=p.status==='Parsed';
+    const pc=parsed?'ok':'pd';
+    const annex=p.annex!=null?('Annex ('+p.annex+')'):'—';
+    return `<tr data-f="${p.original}">
+      <td>${p.original}</td>
+      <td>${p.code||'<span class=\"hl wn\">?</span>'}</td>
+      <td>${p.no||'<span class=\"hl wn\">?</span>'}</td>
+      <td>${p.annex!=null?p.annex:'—'}</td>
+      <td>${p.type||'—'}</td>
+      <td class="${pc}">${parsed?'✓ Parsed':'⚑ Manual Review'}</td>
+      <td class="muted">— waiting</td><td>—</td><td>—</td><td>—</td><td></td></tr>`;
+  }).join('') || '<tr><td colspan=11 class="muted">Inbox is empty — upload PDFs above.</td></tr>';
   $('c_ok').textContent=0;$('c_pd').textContent=0;$('barf').style.width='0';$('prog').textContent='0 / 0 (0%)';
 }
 async function process(){
@@ -223,13 +236,14 @@ async function poll(){
           ||[...$('tbl').rows].find(x=>x.cells[0].textContent.split('.')[0]===r.file);
     if(tr){
       const[sc,st]=statusCell(r); const[cc,ct]=confClass(r.confidence);
-      tr.cells[1].innerHTML=`<span class="${sc}">${st}</span>`;
-      tr.cells[2].innerHTML=`<span class="${cc}">${ct}</span>`;
+      // columns 0..5 are parse preview (File,Code,No.,Annex,Type,Parse); 6.. are processing
+      tr.cells[6].innerHTML=`<span class="${sc}">${st}</span>`;
+      tr.cells[7].innerHTML=`<span class="${cc}">${ct}</span>`;
       const missAg=(r.missing||[]).includes('agreement_date');
       const missSr=(r.missing||[]).includes('sr_number');
-      tr.cells[3].innerHTML=missAg?'<span class="hl wn">missing</span>':'ok';
-      tr.cells[4].innerHTML=missSr?'<span class="hl wn">missing</span>':'ok';
-      tr.cells[5].innerHTML=(r.warnings||[]).join('<br>')||(r.review_reason||'');
+      tr.cells[8].innerHTML=missAg?'<span class="hl wn">missing</span>':'ok';
+      tr.cells[9].innerHTML=missSr?'<span class="hl wn">missing</span>':'ok';
+      tr.cells[10].innerHTML=(r.warnings||[]).join('<br>')||(r.review_reason||'');
     }
   });
   $('c_ok').textContent=ok;$('c_pd').textContent=pd;

@@ -43,12 +43,11 @@ jobs:
           Write-Host "Copying engine + DLLs from $src"
           Copy-Item "$src\tesseract.exe" $ocr -Force
           Get-ChildItem "$src" -Filter *.dll | ForEach-Object { Copy-Item $_.FullName $ocr -Force }
-          # leptonica / other DLLs sometimes sit in subfolders
           Get-ChildItem "$src" -Recurse -Filter *.dll | ForEach-Object {
             $d = Join-Path $ocr $_.Name; if (-not (Test-Path $d)) { Copy-Item $_.FullName $d -Force }
           }
 
-      # 5) Download eng / ara / fra traineddata (official tessdata_best)
+      # 5) Download eng / ara / fra traineddata
       - name: Download language data (eng, ara, fra)
         shell: pwsh
         run: |
@@ -79,7 +78,7 @@ jobs:
           }
           Write-Host "OCR bundle verified: tesseract.exe + $dllCount DLL(s) + eng/ara/fra."
 
-      # 7) Use the packaged config that FORCES bundled OCR (no system fallback)
+      # 7) Use the packaged config that FORCES bundled OCR
       - name: Apply packaged config (ocr_force_bundled = true)
         shell: pwsh
         run: Copy-Item "packaging\config.packaged.json" "config.json" -Force

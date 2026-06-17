@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Kareem T-01 — EDECS Contract Processor</title>
+<style>
+  :root{--gold:#A5872F;--green:#155F65;--side:#f3f1ea;--card:#f6f5f0;--text:#2c2c2a;
+        --muted:#6b6b66;--line:#e3e1d8;--warn:#b8860b;--bad:#b3261e;--ok:#155F65;--hl:#FFF3B0}
+  *{box-sizing:border-box;font-family:"Segoe UI",Tahoma,Arial,sans-serif}
+  body{margin:0;background:#fff;color:var(--text);height:100vh;display:flex;flex-direction:column}
+  .wrap{flex:1;display:flex;min-height:0}
+  .side{width:210px;background:var(--side);padding:14px 8px;display:flex;flex-direction:column;gap:2px}
+  .logo{color:var(--gold);font-size:21px;font-weight:800;padding:8px 12px 0}
+  .sub{color:var(--muted);font-size:12px;padding:0 12px 14px}
+  .nav{padding:11px 12px;border-radius:8px;cursor:pointer;color:var(--text);font-size:14px}
+  .nav:hover{background:#ece6d6}
+  .nav.active{background:#f1e9d4;color:var(--gold);font-weight:700}
+  .main{flex:1;padding:20px;overflow:auto}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .cards{display:flex;gap:12px;margin:14px 0}
+  .c{flex:1;background:var(--card);border-radius:10px;padding:14px}
+  .c .t{color:var(--muted);font-size:13px}.c .v{font-size:28px;font-weight:800}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+  th{background:var(--card);text-align:left;padding:9px;border-bottom:1px solid var(--line);font-size:12px}
+  td{padding:8px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+  .ok{color:var(--ok);font-weight:600}.pd{color:var(--gold);font-weight:600}
+  .wn{color:var(--warn);font-weight:600}.bad{color:var(--bad);font-weight:600}
+  .hl{background:var(--hl)}
+  .bar{height:12px;background:var(--card);border-radius:99px;overflow:hidden;flex:1}
+  .bar>i{display:block;height:100%;width:0;background:var(--green);transition:width .3s}
+  button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:14px}
+  button:hover{border-color:var(--gold)}
+  button.primary{background:var(--green);color:#fff;border:none;font-weight:700}
+  button.gold{background:var(--gold);color:#fff;border:none;font-weight:700}
+  textarea,select,input{border:1px solid var(--line);border-radius:8px;padding:8px;font-size:14px}
+  textarea{width:100%;font-family:Consolas,monospace}
+  label{font-size:13px;color:var(--muted);display:block;margin-bottom:3px}
+  .muted{color:var(--muted);font-size:13px}
+  .drop{border:2px dashed var(--gold);border-radius:12px;padding:26px;text-align:center;color:var(--muted);
+        background:#fbfaf5;cursor:pointer;margin:6px 0}
+  .drop.over{background:#f1e9d4;color:var(--gold)}
+  .foot{background:var(--side);text-align:center;padding:8px;border-top:1px solid var(--line)}
+  .foot b{display:block;color:var(--text);font-size:13px}.foot span{color:var(--muted);font-size:11px;display:block}
+  .view{display:none}.view.show{display:block}
+  h2{font-weight:700;margin:0 0 10px;font-size:20px}
+  .pill{padding:2px 8px;border-radius:99px;font-size:11px;font-weight:700}
+  .field{margin:8px 0}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .box{background:var(--card);border-radius:10px;padding:14px}
+  .chk{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}
+  details summary{cursor:pointer;color:var(--gold);font-weight:600;margin:8px 0}
+  .badge{font-size:11px;padding:1px 6px;border-radius:6px;background:#eee}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="side">
+    <div class="logo">Kareem T-01</div>
+    <div class="sub">EDECS Contract Processor</div>
+    <div class="nav active" data-v="process">▶ Process</div>
+    <div class="nav" data-v="pending">⚑ Pending / Manual Review</div>
+    <div class="nav" data-v="emails">✉ Emails</div>
+    <div class="nav" data-v="history">🕘 History</div>
+    <div class="nav" data-v="settings">⚙ Settings</div>
+  </div>
+  <div class="main">
+
+    <!-- ===================== PROCESS ===================== -->
+    <div class="view show" id="process">
+      <h2>Process Contract Bundles</h2>
+
+      <div class="drop" id="drop">
+        <b>Drag &amp; drop PDF bundles here</b><br><span class="muted">or click to choose files — uploaded into the app Inbox</span>
+        <input type="file" id="filein" accept="application/pdf" multiple style="display:none">
+      </div>
+
+      <div class="row">
+        <div class="field"><label>OCR Language</label><select id="lang" style="width:240px"></select></div>
+        <div class="field"><label>Agreement Date (optional)</label><input id="agdate" placeholder="YYYY-MM-DD or DD/MM/YYYY" style="width:200px"></div>
+        <div class="field"><label>SR Number (optional)</label><input id="srno" placeholder="SR-2026-00125" style="width:180px"></div>
+        <div class="field"><label>&nbsp;</label><button onclick="scan()">↻ Scan Inbox</button></div>
+      </div>
+      <div class="muted" id="syncpath">📂 …</div>
+
+      <div class="cards">
+        <div class="c"><div class="t">In Inbox</div><div class="v" id="c_in">0</div></div>
+        <div class="c"><div class="t">Done</div><div class="v" id="c_ok" style="color:var(--green)">0</div></div>
+        <div class="c"><div class="t">Manual Review</div><div class="v" id="c_pd" style="color:var(--gold)">0</div></div>
+      </div>
+
+      <table><thead><tr>
+        <th>File</th><th>Status</th><th>OCR Conf.</th><th>Agreement Date</th><th>SR Number</th><th>Notes</th>
+      </tr></thead><tbody id="tbl"></tbody></table>
+
+      <div class="row" style="margin:16px 0">
+        <div class="bar"><i id="barf"></i></div><span class="muted" id="prog">0 / 0 (0%)</span>
+      </div>
+      <button class="primary" style="width:100%;padding:15px;font-size:16px" onclick="process()">▶ Process Inbox</button>
+    </div>
+
+    <!-- ===================== PENDING ===================== -->
+    <div class="view" id="pending">
+      <h2>Pending / Manual Review</h2>
+      <p class="muted">Files routed here need a manual page range, a date/SR correction, or a re-scan. Fix and reprocess.</p>
+      <button onclick="loadPending()">↻ Refresh</button>
+      <div id="pendlist"></div>
+    </div>
+
+    <!-- ===================== EMAILS ===================== -->
+    <div class="view" id="emails">
+      <h2>Project Email Recipients</h2>
+      <div class="row">
+        <div class="field"><label>Project code</label>
+          <input id="proj" list="projlist" style="width:200px" oninput="loadProj()">
+          <datalist id="projlist"></datalist></div>
+        <span class="muted">Type a new code to add it.</span>
+      </div>
+      <div class="field"><label>To (one recipient per line)</label><textarea id="to" rows="4"></textarea></div>
+      <div class="field"><label>Cc (one recipient per line)</label><textarea id="cc" rows="8"></textarea></div>
+      <button class="gold" onclick="saveProj()">💾 Save to recipients.json</button>
+    </div>
+
+    <!-- ===================== HISTORY ===================== -->
+    <div class="view" id="history">
+      <h2>Processing History</h2>
+      <button onclick="loadHistory()">↻ Refresh</button>
+      <table><thead><tr>
+        <th>Time</th><th>File</th><th>Output PDF</th><th>Conf.</th><th>Status</th><th>Missing</th><th>Email / SR Log</th>
+      </tr></thead><tbody id="histtbl"></tbody></table>
+    </div>
+
+    <!-- ===================== SETTINGS ===================== -->
+    <div class="view" id="settings">
+      <h2>Settings</h2>
+      <div class="grid">
+        <div class="box">
+          <h3 style="margin-top:0">Folders &amp; Output</h3>
+          <div class="field"><label>Sync folder</label><input id="s_sync" style="width:100%"></div>
+          <div class="field"><label>Output folder (blank = Sync/Output)</label><input id="s_out" style="width:100%"></div>
+          <div class="field"><label>Name separator (before Arabic vendor)</label><input id="s_sep" style="width:80px"></div>
+          <div class="field"><label><input type="checkbox" id="s_outlook"> Create real Outlook draft (else .eml)</label></div>
+          <h3>OCR</h3>
+          <div class="field"><label>Default OCR language</label><select id="s_lang"></select></div>
+          <div class="field"><label>OCR DPI</label><input id="s_dpi" type="number" style="width:100px"></div>
+          <div class="field"><label><input type="checkbox" id="s_force"> Force bundled OCR (disable system fallback)</label></div>
+          <button class="gold" onclick="saveSettings()">💾 Save Settings</button>
+          <span class="muted" id="setmsg"></span>
+        </div>
+        <div class="box">
+          <h3 style="margin-top:0">Bundled OCR</h3>
+          <div class="muted">Resolved Tesseract: <span id="r_exe" class="badge">…</span></div>
+          <div class="muted">Tessdata: <span id="r_td" class="badge">…</span></div>
+          <div class="muted">Source: <span id="r_src" class="badge">…</span></div>
+          <div class="row" style="margin:12px 0">
+            <button onclick="ocrHealth()">🩺 OCR Health Check</button>
+            <button onclick="ocrConf()">🎯 OCR Confidence Test</button>
+          </div>
+          <div id="healthbox"></div>
+          <div id="confbox"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="foot">
+  <b>Kareem T_01</b>
+  <span>Developed for the DPC Department in EDECS_EGY</span>
+  <span>By Kareem Talaat &amp; Alaaeldien Alhennawy</span>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let RECS={}, LANGS=[];
+
+document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>{
+  document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(x=>x.classList.remove('show'));
+  n.classList.add('active'); $(n.dataset.v).classList.add('show');
+  const v=n.dataset.v;
+  if(v==='process')scan();
+  if(v==='emails')loadRecips();
+  if(v==='pending')loadPending();
+  if(v==='history')loadHistory();
+  if(v==='settings')loadSettings();
+});
+
+function confClass(c){if(c==null)return['','—'];if(c>=90)return['ok',c+'% Excellent'];
+  if(c>=80)return['wn',c+'% Acceptable'];if(c>=70)return['wn',c+'% Weak'];return['bad',c+'% Failed'];}
+function statusCell(r){
+  if(r.status==='done')return['ok','✅ Done'];
+  if(r.status==='warning')return['wn','⚠️ Done (warnings)'];
+  if(r.status==='manual')return['pd','⚑ Manual Review'];
+  if(r.status==='failed')return['bad','❌ Failed'];
+  return['muted','— waiting'];}
+
+// ---------- Process ----------
+async function scan(){
+  const r=await fetch('/api/inbox').then(x=>x.json());
+  $('syncpath').textContent='📂 '+r.inbox;
+  if(!LANGS.length){LANGS=r.languages;
+    $('lang').innerHTML=LANGS.map(l=>`<option ${l===r.default_language||(l==='Arabic + English'&&r.default_language==='ara+eng')?'selected':''}>${l}</option>`).join('');}
+  $('c_in').textContent=r.count;
+  $('tbl').innerHTML=r.files.map(f=>`<tr data-f="${f}"><td>${f}</td><td class="muted">— waiting</td><td>—</td><td>—</td><td>—</td><td></td></tr>`).join('')
+     ||'<tr><td colspan=6 class="muted">Inbox is empty — upload PDFs above.</td></tr>';
+  $('c_ok').textContent=0;$('c_pd').textContent=0;$('barf').style.width='0';$('prog').textContent='0 / 0 (0%)';
+}
+async function process(){
+  const body={language:$('lang').value,agreement_date:$('agdate').value.trim(),sr_number:$('srno').value.trim()};
+  await fetch('/api/process',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  poll();
+}
+async function poll(){
+  const s=await fetch('/api/status').then(x=>x.json());
+  const pct=s.total?Math.round(s.done*100/s.total):0;
+  $('barf').style.width=pct+'%';$('prog').textContent=`${s.done} / ${s.total} (${pct}%)`;
+  let ok=0,pd=0;
+  s.rows.forEach(r=>{
+    if(r.status==='done'||r.status==='warning')ok++; else pd++;
+    const tr=document.querySelector(`#tbl tr[data-f="${CSS.escape(r.file)}"]`)
+          ||[...$('tbl').rows].find(x=>x.cells[0].textContent.split('.')[0]===r.file);
+    if(tr){
+      const[sc,st]=statusCell(r); const[cc,ct]=confClass(r.confidence);
+      tr.cells[1].innerHTML=`<span class="${sc}">${st}</span>`;
+      tr.cells[2].innerHTML=`<span class="${cc}">${ct}</span>`;
+      const missAg=(r.missing||[]).includes('agreement_date');
+      const missSr=(r.missing||[]).includes('sr_number');
+      tr.cells[3].innerHTML=missAg?'<span class="hl wn">missing</span>':'ok';
+      tr.cells[4].innerHTML=missSr?'<span class="hl wn">missing</span>':'ok';
+      tr.cells[5].innerHTML=(r.warnings||[]).join('<br>')||(r.review_reason||'');
+    }
+  });
+  $('c_ok').textContent=ok;$('c_pd').textContent=pd;
+  if(s.running)setTimeout(poll,800);
+}
+
+// ---------- Upload ----------
+const drop=$('drop'),filein=$('filein');
+drop.onclick=()=>filein.click();
+filein.onchange=()=>uploadFiles(filein.files);
+['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('over');}));
+['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('over');}));
+drop.addEventListener('drop',ev=>uploadFiles(ev.dataTransfer.files));
+async function uploadFiles(list){
+  const fd=new FormData();let n=0;
+  for(const f of list){if(f.name.toLowerCase().endsWith('.pdf')){fd.append('files',f);n++;}}
+  if(!n)return alert('Please choose PDF files.');
+  const r=await fetch('/api/upload',{method:'POST',body:fd}).then(x=>x.json());
+  alert('Uploaded '+(r.count||0)+' file(s) to Inbox.');scan();
+}
+
+// ---------- Pending / Manual review ----------
+async function loadPending(){
+  const r=await fetch('/api/pending').then(x=>x.json());
+  if(!r.items||!r.items.length){$('pendlist').innerHTML='<p class="muted">No pending files.</p>';return;}
+  $('pendlist').innerHTML=r.items.map((it,i)=>`
+    <div class="box" style="margin:10px 0">
+      <b>${it.file}</b><div class="wn" style="margin:4px 0">Reason: ${it.reason}</div>
+      <div class="row">
+        <div class="field"><label>OCR Language</label><select id="pl_${i}">${LANGS.map(l=>`<option>${l}</option>`).join('')}</select></div>
+        <div class="field"><label>Page range start</label><input id="ps_${i}" style="width:90px" type="number"></div>
+        <div class="field"><label>Page range end</label><input id="pe_${i}" style="width:90px" type="number"></div>
+        <div class="field"><label>Agreement Date</label><input id="pd_${i}" style="width:160px" placeholder="YYYY-MM-DD"></div>
+        <div class="field"><label>SR Number</label><input id="psr_${i}" style="width:150px"></div>
+        <div class="field"><label>&nbsp;</label><button class="primary" onclick="reproc('${it.file.replace(/'/g,"\\'")}',${i})">Reprocess</button></div>
+      </div>
+      <div class="muted" id="pmsg_${i}"></div>
+    </div>`).join('');
+}
+async function reproc(file,i){
+  const body={file:file+'.pdf',language:$('pl_'+i).value,
+    agreement_date:$('pd_'+i).value.trim(),sr_number:$('psr_'+i).value.trim()};
+  const s=$('ps_'+i).value,e=$('pe_'+i).value;
+  if(s&&e){body.range_start=s;body.range_end=e;}
+  $('pmsg_'+i).textContent='Processing…';
+  const r=await fetch('/api/process_one',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json());
+  $('pmsg_'+i).textContent=r.msg||r.review_reason||r.error||'Done.';
+}
+
+// ---------- Emails ----------
+async function loadRecips(){RECS=await fetch('/api/recipients').then(x=>x.json());
+  $('projlist').innerHTML=Object.keys(RECS).sort().map(k=>`<option value="${k}">`).join('');}
+function loadProj(){const d=RECS[$('proj').value]||{to:'',cc:''};
+  $('to').value=(d.to||'').split(';').map(s=>s.trim()).filter(Boolean).join('\n');
+  $('cc').value=(d.cc||'').split(';').map(s=>s.trim()).filter(Boolean).join('\n');}
+async function saveProj(){const k=$('proj').value.trim();if(!k)return alert('Enter a project code.');
+  RECS[k]={to:$('to').value.split('\n').map(s=>s.trim()).filter(Boolean).join('; '),
+           cc:$('cc').value.split('\n').map(s=>s.trim()).filter(Boolean).join('; ')};
+  await fetch('/api/recipients',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(RECS)});
+  loadRecips();alert('Saved: '+k);}
+
+// ---------- History ----------
+async function loadHistory(){
+  const r=await fetch('/api/history').then(x=>x.json());
+  const a=(r.audit||[]).filter(x=>x.status).reverse();
+  $('histtbl').innerHTML=a.map(x=>{
+    const[cc,ct]=confClass(x.ocr_confidence);
+    return `<tr><td>${(x.timestamp||'').replace('T',' ')}</td><td>${x.file||''}</td>
+      <td>${x.output_pdf?`<a href="/api/download?name=${encodeURIComponent(x.output_pdf)}">${x.output_pdf}</a>`:''}</td>
+      <td class="${cc}">${x.ocr_confidence!=null?x.ocr_confidence+'%':'—'}</td>
+      <td>${x.status||''}</td><td class="wn">${(x.missing_fields||[]).join(', ')}</td>
+      <td class="muted">${x.email_draft?'✉':''} ${x.manual_review_reason||''}</td></tr>`;
+  }).join('')||'<tr><td colspan=7 class="muted">No history yet.</td></tr>';
+}
+
+// ---------- Settings ----------
+async function loadSettings(){
+  const c=await fetch('/api/settings').then(x=>x.json());
+  $('s_sync').value=c.sync_dir||'';$('s_out').value=c.output_dir||'';
+  $('s_sep').value=c.name_separator||'_';$('s_outlook').checked=!!c.make_outlook_draft;
+  $('s_dpi').value=c.ocr_dpi||300;$('s_force').checked=!!c.ocr_force_bundled;
+  $('s_lang').innerHTML=(c._languages||[]).map(l=>`<option>${l}</option>`).join('');
+  // select default
+  const map={ara:'Arabic',eng:'English',fra:'French','ara+eng':'Arabic + English','ara+eng+fra':'Arabic + English + French'};
+  $('s_lang').value=map[c.ocr_default_language]||'Arabic + English';
+  $('r_exe').textContent=c._resolved_tesseract||'NOT FOUND';
+  $('r_td').textContent=c._resolved_tessdata||'NOT FOUND';
+  $('r_src').textContent=c._ocr_source||'none';
+}
+async function saveSettings(){
+  const map={'Arabic':'ara','English':'eng','French':'fra','Arabic + English':'ara+eng','Arabic + English + French':'ara+eng+fra'};
+  const body={sync_dir:$('s_sync').value,output_dir:$('s_out').value,name_separator:$('s_sep').value,
+    make_outlook_draft:$('s_outlook').checked,ocr_default_language:map[$('s_lang').value]||'ara+eng',
+    ocr_dpi:Number($('s_dpi').value)||300,ocr_force_bundled:$('s_force').checked};
+  const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json());
+  $('setmsg').textContent=' '+(r.note||'Saved.');
+}
+async function ocrHealth(){
+  $('healthbox').innerHTML='<p class="muted">Checking…</p>';
+  const r=await fetch('/api/ocr/health').then(x=>x.json());
+  $('healthbox').innerHTML=`<div style="margin:8px 0;font-weight:700" class="${r.ok?'ok':'bad'}">
+     Overall: ${r.ok?'READY':'NOT READY'} (source: ${r.source})</div>`+
+    r.items.map(it=>{const bad=/Not Ready|Failed/.test(it.status);
+      return `<div class="chk"><span>${it.check}</span><span class="${bad?'bad':'ok'}">${it.status}</span></div>`;}).join('');
+}
+async function ocrConf(){
+  $('confbox').innerHTML='<p class="muted">Running confidence test…</p>';
+  const map={'Arabic':'ara','English':'eng','French':'fra','Arabic + English':'ara+eng','Arabic + English + French':'ara+eng+fra'};
+  const lang=map[$('s_lang').value]||'ara+eng';
+  const r=await fetch('/api/ocr/confidence',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:lang})}).then(x=>x.json());
+  const cls=r.confidence>=90?'ok':r.confidence>=70?'wn':'bad';
+  $('confbox').innerHTML=`<div class="box" style="margin-top:10px">
+     <div class="${cls}" style="font-size:18px;font-weight:800">${r.confidence}% — ${r.status}</div>
+     <div class="muted">${r.action||''}</div>
+     ${r.error?`<div class="bad">${r.error}</div>`:''}
+     ${r.text?`<details><summary>Recognised text</summary><pre style="white-space:pre-wrap">${(r.text||'').replace(/</g,'&lt;')}</pre></details>`:''}
+     </div>`;
+}
+
+scan();
+</script>
+</body>
+</html>

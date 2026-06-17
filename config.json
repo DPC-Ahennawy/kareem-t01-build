@@ -1,0 +1,11 @@
+{
+  "sync_dir": "",
+  "output_dir": "",
+  "ocr_mode": "bundled",
+  "ocr_default_language": "ara+eng",
+  "ocr_dpi": 300,
+  "ocr_confidence_test": true,
+  "ocr_force_bundled": false,
+  "name_separator": "_",
+  "make_outlook_draft": true
+}

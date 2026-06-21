@@ -311,3 +311,44 @@ via the new `/api/parse_preview` endpoint, before any OCR runs.
 (25 checks). Run: `python test_filename_parser.py`.
 
 The v1.0.1 OCR tessdata fix is retained unchanged.
+
+---
+
+## 16. Fix log — v1.0.3 (page-range detection + Manual Review workflow)
+
+**Issue 2 — page-range detection (`process_contracts.py`, generic, not file-specific):**
+- `analyse()` reworked with multi-signal priority: (1) fast visual-repeat of a contiguous
+  block with an **adaptive** similarity threshold (0.92→0.82) so noisy scans of two copies are
+  detected; (2) `Page 1 of N … Page N of N` footer sequence (eng + Arabic-tolerant); (3) FRM
+  footer run; (4) contract-number token.
+- **Start-page validation** (`valid_start_page`): a block must not begin at `Page 2 of N` when the
+  previous page is `Page 1 of N` of the same sequence — it shifts back to the real first page.
+- If duplicate complete copies exist, the **first** copy is chosen.
+- If detection is uncertain, the file is routed to **Manual Review** (no silent finalisation).
+- Verified: `78-60238.pdf` (16 pages, PO 1–2, copies 3–9 & 10–16) → selects **human pages 3–9,
+  internal indexes 2–8, 7-page output**. Nothing about this file is hardcoded.
+
+**Dynamic extraction (`extract_contract_fields`):** supplier/company, scope, project, PO/contract
+no, and amount are OCR-extracted from the **selected contract range** using generic Arabic/English
+label patterns. No sample supplier/scope/amount/project is hardcoded; different documents yield
+different values, and unconfident fields are flagged for Manual Review.
+
+**Issue 1 — Manual Review workflow:**
+- Persistent queue (`Output/manual_review.json`). **Any** processed file with missing, weak, or
+  low-confidence fields gets a record — even when it finished as “Done with warnings”.
+- New API: `GET /api/manual_review`, `POST /api/manual_review/{file_id}/save`,
+  `POST /api/manual_review/{file_id}/reprocess`.
+- Process result rows now include `extracted_fields`, `missing_fields`, `low_confidence_fields`,
+  `manual_review_required`, `manual_review_reason`, and `page_range`.
+- The **Pending / Manual Review** screen lists every record with an editable correction form
+  (project code, contract no, annex, page range start/end, agreement date, SR no, PO no, vendor
+  account, company, scope, amount, project), **Save** and **Reprocess with manual values** buttons,
+  status, and output links. Manual values override OCR; reprocess regenerates the contract PDF,
+  the SR Log row, and the email/.eml; corrected files drop off the queue.
+
+Retained unchanged: bundled-OCR tessdata fix (v1.0.1), deterministic filename parser (v1.0.2),
+email/.eml generation, GitHub Actions packaging, `ocr_force_bundled` behaviour.
+
+**Tests:** `test_v103.py` (20 checks: page range 3–9/idx 2–8, start-page validation, sequence
+detection, dynamic extraction differing across 2 mocked contracts, manual-review create/save/
+reprocess, output regeneration) + `test_filename_parser.py` (25). All pass.

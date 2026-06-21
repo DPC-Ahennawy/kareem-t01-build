@@ -103,7 +103,7 @@
     <!-- ===================== PENDING ===================== -->
     <div class="view" id="pending">
       <h2>Pending / Manual Review</h2>
-      <p class="muted">Files routed here need a manual page range, a date/SR correction, or a re-scan. Fix and reprocess.</p>
+      <p class="muted">Every file with missing, weak, or low-confidence fields appears here — even ones processed as “Done with warnings”. Edit the fields, save, then reprocess to regenerate the contract PDF, SR Log row, and email draft.</p>
       <button onclick="loadPending()">↻ Refresh</button>
       <div id="pendlist"></div>
     </div>
@@ -267,30 +267,76 @@ async function uploadFiles(list){
 
 // ---------- Pending / Manual review ----------
 async function loadPending(){
-  const r=await fetch('/api/pending').then(x=>x.json());
-  if(!r.items||!r.items.length){$('pendlist').innerHTML='<p class="muted">No pending files.</p>';return;}
-  $('pendlist').innerHTML=r.items.map((it,i)=>`
-    <div class="box" style="margin:10px 0">
-      <b>${it.file}</b><div class="wn" style="margin:4px 0">Reason: ${it.reason}</div>
-      <div class="row">
-        <div class="field"><label>OCR Language</label><select id="pl_${i}">${LANGS.map(l=>`<option>${l}</option>`).join('')}</select></div>
-        <div class="field"><label>Page range start</label><input id="ps_${i}" style="width:90px" type="number"></div>
-        <div class="field"><label>Page range end</label><input id="pe_${i}" style="width:90px" type="number"></div>
-        <div class="field"><label>Agreement Date</label><input id="pd_${i}" style="width:160px" placeholder="YYYY-MM-DD"></div>
-        <div class="field"><label>SR Number</label><input id="psr_${i}" style="width:150px"></div>
-        <div class="field"><label>&nbsp;</label><button class="primary" onclick="reproc('${it.file.replace(/'/g,"\\'")}',${i})">Reprocess</button></div>
+  const r=await fetch('/api/manual_review').then(x=>x.json());
+  const items=(r.items||[]).filter(it=>it.status!=='Corrected');
+  if(!items.length){$('pendlist').innerHTML='<p class="muted">No files need manual review.</p>';return;}
+  $('pendlist').innerHTML=items.map((it,i)=>{
+    const ex=it.extracted||{};
+    const miss=(it.missing||[]); const low=(it.low_confidence||[]);
+    const hl=k=>miss.includes(k)?'hl':'';
+    const fid=it.file;
+    return `
+    <div class="box" style="margin:12px 0" data-fid="${fid}">
+      <div class="row" style="justify-content:space-between">
+        <b>${it.original||it.file}</b>
+        <span class="pill" style="background:${it.status==='Corrected'?'#d9ecdb':'#f1e9d4'};color:var(--gold)">${it.status||'Needs Manual Review'}</span>
       </div>
-      <div class="muted" id="pmsg_${i}"></div>
-    </div>`).join('');
+      <div class="wn" style="margin:4px 0">Reason: ${it.reason||''}</div>
+      <div class="muted">OCR conf: ${it.ocr_confidence!=null?it.ocr_confidence+'%':'—'} ${low.length?(' | low-confidence: '+low.join(', ')):''}</div>
+      <div class="grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px">
+        <div class="field"><label>Project code</label><input id="f_code_${i}" value="${it.code||''}" disabled></div>
+        <div class="field"><label>Contract number</label><input id="f_no_${i}" value="${it.no||''}" disabled></div>
+        <div class="field"><label>Annex</label><input id="f_annex_${i}" value="${it.annex!=null?it.annex:''}" disabled></div>
+        <div class="field"><label>Range start (human page)</label><input id="f_rs_${i}" type="number" value="${it.range_start||''}"></div>
+        <div class="field"><label>Range end (human page)</label><input id="f_re_${i}" type="number" value="${it.range_end||''}"></div>
+        <div class="field"><label>OCR Language</label><select id="f_lang_${i}">${LANGS.map(l=>`<option>${l}</option>`).join('')}</select></div>
+        <div class="field ${hl('agreement_date')}"><label>Agreement date</label><input id="f_agdate_${i}" value="${ex.agreement_date||''}" placeholder="YYYY-MM-DD"></div>
+        <div class="field ${hl('sr_number')}"><label>SR number</label><input id="f_sr_${i}" value="${ex.sr_number||''}"></div>
+        <div class="field ${hl('po_no')}"><label>PO / Contract no.</label><input id="f_po_${i}" value="${ex.po_no||''}"></div>
+        <div class="field ${hl('vendor_account')}"><label>Vendor account</label><input id="f_va_${i}" value="${ex.vendor_account||''}"></div>
+        <div class="field ${hl('company')}"><label>Company / supplier</label><input id="f_co_${i}" value="${ex.company||''}"></div>
+        <div class="field ${hl('scope')}"><label>Scope</label><input id="f_scope_${i}" value="${ex.scope||''}"></div>
+        <div class="field ${hl('amount')}"><label>Amount / value</label><input id="f_amt_${i}" value="${ex.amount||''}"></div>
+        <div class="field"><label>Project name</label><input id="f_proj_${i}" value="${ex.project||''}"></div>
+      </div>
+      <div class="muted">Missing: <span class="wn">${miss.join(', ')||'none'}</span></div>
+      <div class="row" style="margin-top:8px">
+        <button class="gold" onclick="mrSave('${fid}',${i})">💾 Save corrections</button>
+        <button class="primary" onclick="mrReprocess('${fid}',${i})">▶ Reprocess with manual values</button>
+        <span class="muted" id="mrmsg_${i}"></span>
+      </div>
+      <div class="muted" id="mrout_${i}"></div>
+    </div>`;}).join('');
 }
-async function reproc(file,i){
-  const body={file:file+'.pdf',language:$('pl_'+i).value,
-    agreement_date:$('pd_'+i).value.trim(),sr_number:$('psr_'+i).value.trim()};
-  const s=$('ps_'+i).value,e=$('pe_'+i).value;
-  if(s&&e){body.range_start=s;body.range_end=e;}
-  $('pmsg_'+i).textContent='Processing…';
-  const r=await fetch('/api/process_one',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json());
-  $('pmsg_'+i).textContent=r.msg||r.review_reason||r.error||'Done.';
+function mrBody(i){
+  return {
+    agreement_date:$('f_agdate_'+i).value.trim(), sr_number:$('f_sr_'+i).value.trim(),
+    po_no:$('f_po_'+i).value.trim(), vendor_account:$('f_va_'+i).value.trim(),
+    company:$('f_co_'+i).value.trim(), scope:$('f_scope_'+i).value.trim(),
+    amount:$('f_amt_'+i).value.trim(), project:$('f_proj_'+i).value.trim(),
+    range_start:$('f_rs_'+i).value, range_end:$('f_re_'+i).value,
+    language:$('f_lang_'+i).value
+  };
+}
+async function mrSave(fid,i){
+  $('mrmsg_'+i).textContent='Saving…';
+  const r=await fetch('/api/manual_review/'+encodeURIComponent(fid)+'/save',
+    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(mrBody(i))}).then(x=>x.json());
+  $('mrmsg_'+i).textContent=r.ok?'✅ Saved.':'Save failed.';
+}
+async function mrReprocess(fid,i){
+  $('mrmsg_'+i).textContent='Reprocessing…'; $('mrout_'+i).textContent='';
+  const r=await fetch('/api/manual_review/'+encodeURIComponent(fid)+'/reprocess',
+    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(mrBody(i))}).then(x=>x.json());
+  if(r.error){$('mrmsg_'+i).textContent='❌ '+r.error;return;}
+  const res=r.result||{};
+  $('mrmsg_'+i).textContent=(res.status==='done'?'✅ Done — ':'⚠️ ')+(res.msg||'');
+  let links='';
+  if(res.output_pdf)links+=`<a href="/api/download?name=${encodeURIComponent(res.output_pdf)}">${res.output_pdf}</a> · `;
+  links+='SR Log - NEW ROWS.xlsx generated';
+  if(res.eml)links+=' · email draft generated';
+  $('mrout_'+i).innerHTML='Outputs: '+links;
+  setTimeout(loadPending,1200);   // refresh: corrected items drop off
 }
 
 // ---------- Emails ----------

@@ -58,6 +58,7 @@ INBOX  = os.path.join(SYNC, "Inbox")
 OUTPUT = CFG.get("output_dir") or os.path.join(SYNC, "Output")
 SRLOG  = os.path.join(SYNC, "SR Log 2026.xlsx")
 AUDIT  = os.path.join(OUTPUT, "audit_log.jsonl")
+MRQ    = os.path.join(OUTPUT, "manual_review.json")   # persistent manual-review queue
 
 REFS   = json.load(open(os.path.join(HERE, "refs.json"), encoding="utf-8"))
 RECIPS = json.load(open(os.path.join(HERE, "recipients.json"), encoding="utf-8"))
@@ -321,19 +322,215 @@ def contract_date(pdf_path, page_idx, lang=None):
         return (f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}", f"{MON_ABBR[int(m.group(2))]} {m.group(3)}")
     return ("", "")
 
-def analyse(pdf_path, pages, code, no):
+def extract_contract_fields(pdf_path, copy_pages, lang=None):
+    """
+    Dynamically OCR the FIRST page(s) of the selected contract range and pull contract
+    fields. Returns {field: {"value": str, "conf": float}}. NOTHING is hardcoded per
+    document — only generic Arabic/English label patterns are used. Low confidence or
+    no-match leaves value "" so the caller can route the field to Manual Review.
+    """
+    import pytesseract
+    from PIL import Image
+    if not copy_pages:
+        return {}
+    _prep_ocr()
+    lang = lang or CFG.get("ocr_default_language") or "ara+eng"
+    cfgstr = OCR.tess_config(CFG, extra="--psm 6")
+    doc = get_fitz().open(pdf_path)
+    text = ""; pconf = []
+    for idx in copy_pages[:2]:                      # first 1-2 pages carry the header info
+        if idx >= len(doc):
+            continue
+        pix = doc[idx].get_pixmap(matrix=get_fitz().Matrix(200 / 72.0, 200 / 72.0))
+        im = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        text += "\n" + pytesseract.image_to_string(im, lang=lang, config=cfgstr)
+        pconf.append(OCR.page_confidence(im, CFG, lang))
+    doc.close()
+    base_conf = round(sum(pconf) / len(pconf), 1) if pconf else 0.0
+
+    def grab(patterns):
+        for pat in patterns:
+            m = re.search(pat, text, re.I)
+            if m:
+                v = re.sub(r"\s+", " ", m.group(1)).strip(" :.-،")
+                if v:
+                    return v
+        return ""
+
+    fields = {}
+    # supplier / second party (generic Arabic labels for "the second party / contractor")
+    fields["company"] = grab([
+        r"(?:الطرف\s*الثاني|المقاول|المورد|الشركة)\s*[:\-/]?\s*([^\n]{3,60})",
+        r"(?:second\s*party|contractor|supplier|vendor)\s*[:\-/]?\s*([^\n]{3,60})",
+    ])
+    # scope / subject of the contract
+    fields["scope"] = grab([
+        r"(?:موضوع\s*(?:العقد|الاتفاق)|نطاق\s*العمل|الأعمال)\s*[:\-/]?\s*([^\n]{3,80})",
+        r"(?:scope(?:\s*of\s*work)?|subject)\s*[:\-/]?\s*([^\n]{3,80})",
+    ])
+    # project name
+    fields["project"] = grab([
+        r"(?:اسم\s*المشروع|المشروع|مشروع)\s*[:\-/]?\s*([^\n]{3,60})",
+        r"(?:project(?:\s*name)?)\s*[:\-/]?\s*([^\n]{3,60})",
+    ])
+    # PO / contract number tokens (generic)
+    fields["po_no"] = grab([
+        r"(ED[EC]{1,2}G?-?0*\d{3,})",
+        r"(?:PO|أمر\s*شراء|رقم\s*العقد)\s*(?:No\.?|رقم)?\s*[:\-/]?\s*([A-Z0-9\-]{4,})",
+    ])
+    # amount / contract value (largest money-looking token)
+    amts = re.findall(r"([0-9][0-9,]*\.\d{2})", text)
+    fields["amount"] = max(amts, key=lambda a: float(a.replace(",", ""))) if amts else ""
+
+    # attach a confidence to each (base OCR conf if we got a value, else 0)
+    return {k: {"value": v, "conf": (base_conf if v else 0.0)} for k, v in fields.items()}, base_conf
+
+
+def page_of_n_flags(pdf_path, lang="eng"):
+    """
+    OCR the bottom strip of every page and read a 'Page X of N' footer if present.
+    Returns a list (per page) of (x, n) tuples or None. Tolerant of OCR noise and of
+    a few Arabic/spacing variants (e.g. 'Page 1 of 7', '1 of 7', '1/7', 'صفحة 1 من 7').
+    No contract content is hardcoded; only the page/total pattern is read.
+    """
+    import pytesseract
+    from PIL import Image
+    _prep_ocr()
+    cfgstr = OCR.tess_config(CFG, extra="--psm 6")
+    doc = get_fitz().open(pdf_path)
+    mat = get_fitz().Matrix(180 / 72.0, 180 / 72.0)
+    out = []
+    pats = [
+        r"page\s*(\d+)\s*of\s*(\d+)",
+        r"\b(\d+)\s*of\s*(\d+)\b",
+        r"\b(\d+)\s*/\s*(\d+)\b",
+        r"(?:صفحة|صفحه)\s*(\d+)\s*(?:من|/)\s*(\d+)",
+    ]
+    for i in range(len(doc)):
+        pix = doc[i].get_pixmap(matrix=mat)
+        im = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        w, h = im.size
+        strip = im.crop((0, int(h * 0.85), w, h))
+        t = " ".join(pytesseract.image_to_string(strip, lang=lang, config=cfgstr).split())
+        hit = None
+        for pat in pats:
+            m = re.search(pat, t, re.I)
+            if m:
+                x, n = int(m.group(1)), int(m.group(2))
+                if 1 <= x <= n <= 60:    # sanity bounds; not a fixed contract length
+                    hit = (x, n); break
+        out.append(hit)
+    doc.close()
+    return out
+
+def sequences_from_pageof(flags):
+    """
+    Given per-page (x, n) footers, return complete contract sequences as (start, end)
+    0-based inclusive blocks where x runs 1..N over consecutive pages with the same N.
+    """
+    seqs = []; n = len(flags); i = 0
+    while i < n:
+        f = flags[i]
+        if f and f[0] == 1:                      # a block that begins at 'Page 1 of N'
+            total = f[1]; j = i; expect = 1
+            while j < n and flags[j] and flags[j][1] == total and flags[j][0] == expect:
+                expect += 1; j += 1
+            got = j - i
+            # accept if we saw the whole 1..N (allow the last page or two to be OCR-missed)
+            if got >= max(1, total - 1):
+                end = i + total - 1
+                if end < n:
+                    seqs.append((i, end))
+                    i = end + 1; continue
+        i += 1
+    return seqs
+
+def valid_start_page(flags, start):
+    """
+    A contract block must not start at 'Page 2 of N' when the previous page is
+    'Page 1 of N' of the same sequence. Returns the corrected start (shift back to
+    the real Page 1 if found), else the original start.
+    """
+    if start < 0 or start >= len(flags):
+        return start
+    here = flags[start]
+    if here and here[0] >= 2 and start > 0:
+        prev = flags[start - 1]
+        if prev and prev[1] == here[1] and prev[0] == here[0] - 1:
+            # walk back to Page 1 of N
+            s = start
+            while s > 0 and flags[s - 1] and flags[s - 1][1] == here[1] \
+                  and flags[s - 1][0] == flags[s][0] - 1:
+                s -= 1
+            return s
+    return start
+
+def analyse(pdf_path, pages, code, no, lang=None):
+    """
+    Decide which pages form ONE contract copy. Generic (no per-file hardcoding).
+    Signal priority:
+      1. 'Page 1 of N .. Page N of N' footer sequence(s) -> take the FIRST complete one.
+      2. Visual-repeat of a contiguous block (two identical copies) with an adaptive
+         similarity threshold, then validate the start is a real first page.
+      3. FRM footer run (single-copy multi-page).
+      4. Contract-number token run (short annex).
+    Returns dict(copy_pages, copies, po_text, confident, reason).
+    'confident' False or copy_pages None -> caller routes to Manual Review.
+    """
+    lang = lang or CFG.get("ocr_default_language") or "ara+eng"
     po_text = "\n".join(t for _, t in pages if re.search(r"purch.{0,4}order", t, re.I))
-    rep = best_repeat(page_vectors(pdf_path), thr=0.92)  # old bundles: 2 identical copies
+
+    def _validate_start(start):
+        """Lazily OCR footers only to confirm we didn't start at 'Page 2 of N'."""
+        try:
+            pof = page_of_n_flags(pdf_path, lang="eng")
+        except Exception:
+            return start, []
+        return valid_start_page(pof, start), pof
+
+    # (1) FAST visual repeat first (no OCR): two identical copies, adaptive threshold.
+    V = page_vectors(pdf_path)
+    rep = None
+    for thr in (0.92, 0.88, 0.85, 0.82):
+        rep = best_repeat(V, thr=thr)
+        if rep:
+            break
     if rep:
         s, L = rep["start"], rep["length"]
-        return dict(copy_pages=list(range(s, s + L)), copies=rep["copies"], po_text=po_text, confident=True)
-    blk = longest_frm_run(frm_flags(pdf_path))           # modern multi-page: one copy, FRM footer
+        s, _ = _validate_start(s)                 # shift back to a real Page 1 if needed
+        return dict(copy_pages=list(range(s, s + L)), copies=rep["copies"],
+                    po_text=po_text, confident=True,
+                    reason="visual-repeat sim=%.3f" % rep["sim"])
+
+    # (2) Page-1..N footer sequence (single copy or no clear repeat).
+    try:
+        pof = page_of_n_flags(pdf_path, lang="eng")
+    except Exception:
+        pof = []
+    seqs = sequences_from_pageof(pof) if pof else []
+    if seqs:
+        s, e = seqs[0]
+        s = valid_start_page(pof, s)
+        return dict(copy_pages=list(range(s, e + 1)), copies=max(1, len(seqs)),
+                    po_text=po_text, confident=True, reason="page-of-N sequence")
+
+    # (3) FRM footer run (single copy, multi-page).
+    blk = longest_frm_run(frm_flags(pdf_path))
     if blk and blk[1] > blk[0]:
-        return dict(copy_pages=list(range(blk[0], blk[1] + 1)), copies=1, po_text=po_text, confident=True)
-    tr = token_run(pages, code, no)                      # short annex: contract no on the page
+        s = blk[0]
+        if pof:
+            s = valid_start_page(pof, s)
+        return dict(copy_pages=list(range(s, blk[1] + 1)), copies=1,
+                    po_text=po_text, confident=True, reason="FRM footer run")
+
+    # (4) contract-number token run (short annex).
+    tr = token_run(pages, code, no)
     if tr:
-        return dict(copy_pages=list(range(tr[0], tr[1] + 1)), copies=1, po_text=po_text, confident=True)
-    return None
+        return dict(copy_pages=list(range(tr[0], tr[1] + 1)), copies=1,
+                    po_text=po_text, confident=True, reason="contract-number token")
+
+    return dict(copy_pages=None, copies=0, po_text=po_text, confident=False,
+                reason="No reliable contract page range found")
 
 _SR = None
 def sr_refs():
@@ -549,37 +746,93 @@ def read_audit():
             except Exception: pass
     return out
 
+
+# ---- Persistent Manual Review queue (spec: ISSUE 1) -----------------------
+def _mrq_load():
+    if not os.path.exists(MRQ):
+        return {}
+    try:
+        return json.load(open(MRQ, encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _mrq_save(data):
+    os.makedirs(OUTPUT, exist_ok=True)
+    json.dump(data, open(MRQ, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+
+def mrq_upsert(record):
+    """Create/update a manual-review record keyed by file id (filename stem)."""
+    data = _mrq_load()
+    fid = record["file"]
+    prev = data.get(fid, {})
+    prev.update(record)
+    prev["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
+    data[fid] = prev
+    _mrq_save(data)
+    return prev
+
+def mrq_get(fid):
+    return _mrq_load().get(fid)
+
+def mrq_list():
+    return list(_mrq_load().values())
+
+def mrq_resolve(fid):
+    """Mark a record corrected (move out of the active queue)."""
+    data = _mrq_load()
+    if fid in data:
+        data[fid]["status"] = "Corrected"
+        data[fid]["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
+        _mrq_save(data)
+    return data.get(fid)
+
 # ---------------------------------------------------------------------------
 # MAIN: process a single bundle. Returns a rich dict for the API/UI.
 #   status: "done" | "warning" | "manual" | "failed"
 # ---------------------------------------------------------------------------
 def process_one(pdf_path, lang=None, manual_agreement_date="", manual_sr_number="",
-                manual_range=None):
+                manual_range=None, manual=None):
+    """
+    Process one bundle. `manual` (dict) may carry user corrections from the Manual Review
+    page and OVERRIDES OCR for: agreement_date, sr_number, po_no, vendor_account, company,
+    scope, amount, project, range_start, range_end. Missing/weak fields never block; they
+    create a persistent Manual Review record and continue (status 'warning').
+    """
+    manual = dict(manual or {})
+    if manual_agreement_date and not manual.get("agreement_date"): manual["agreement_date"] = manual_agreement_date
+    if manual_sr_number and not manual.get("sr_number"): manual["sr_number"] = manual_sr_number
+    if manual.get("range_start") and manual.get("range_end") and not manual_range:
+        manual_range = (int(manual["range_start"]), int(manual["range_end"]))
+
     fn = os.path.splitext(os.path.basename(pdf_path))[0]
     lang = lang or CFG["ocr_default_language"]
     result = {"file": fn, "status": "failed", "msg": "", "confidence": None,
               "missing": [], "warnings": [], "output_pdf": "", "eml": "",
               "sr_added": False, "review_reason": "",
-              # filename pre-processing preview (deterministic, no AI):
+              "extracted_fields": {}, "missing_fields": [], "low_confidence_fields": [],
+              "manual_review_required": False, "manual_review_reason": "",
+              "page_range": None,
               "parsed": {"original": os.path.basename(pdf_path), "code": "", "no": "",
                          "annex": None, "type": "", "status": "Needs Manual Review"}}
 
     meta = parse_bundle_name(fn)
     if not meta:
-        result["parsed"]["status"] = "Needs Manual Review"
-        result.update(status="manual",
+        result.update(status="manual", manual_review_required=True,
                       review_reason=("Filename not understood. Accepted examples: " + PARSE_EXAMPLES),
+                      manual_review_reason=("Filename not understood. Accepted examples: " + PARSE_EXAMPLES),
                       msg="اسم الملف غير مفهوم. أمثلة مقبولة: " + PARSE_EXAMPLES)
-        audit({"file": fn, "status": "manual", "manual_review_reason": result["review_reason"]})
+        mrq_upsert({"file": fn, "original": os.path.basename(pdf_path), "status": "Needs Manual Review",
+                    "reason": result["manual_review_reason"], "extracted": {},
+                    "missing": ["filename"], "low_confidence": [],
+                    "code": "", "no": "", "annex": None, "range_start": "", "range_end": ""})
+        audit({"file": fn, "status": "manual", "manual_review_reason": result["manual_review_reason"]})
         return result
 
-    # populate the parse preview now that the filename is understood
     result["parsed"].update(
         code=meta["code"], no=meta["no"], annex=meta["annex"],
         type=("Addendum %d" % meta["annex"] if meta["annex"] else "Contract"),
         status="Parsed")
 
-    # OCR + confidence
     try:
         pages, conf = ocr_pages(pdf_path, lang=lang, want_conf=True)
     except Exception as e:
@@ -588,48 +841,59 @@ def process_one(pdf_path, lang=None, manual_agreement_date="", manual_sr_number=
         return result
     result["confidence"] = conf
 
-    # <70% confidence -> Manual Review (do not silently finalise)
-    if conf and conf < CONF_THRESHOLD:
-        result.update(status="manual",
-                      review_reason="OCR confidence %.1f%% < %d%%." % (conf, CONF_THRESHOLD),
-                      msg="ثقة OCR منخفضة (%.1f%%) — مراجعة يدوية" % conf)
-        audit({"file": fn, "status": "manual", "ocr_confidence": conf,
-               "ocr_language": lang, "manual_review_reason": result["review_reason"]})
-        return result
-
-    # contract detection
+    # contract detection (manual range overrides everything)
     rng = manual_range or meta.get("manual")
     if rng:
-        s, e = rng
+        s_, e_ = rng
         po_text = "\n".join(t for _, t in pages if re.search(r"purch.{0,4}order", t, re.I))
-        info = {"copy_pages": list(range(s - 1, e)), "copies": 1, "po_text": po_text, "confident": True}
+        info = {"copy_pages": list(range(s_ - 1, e_)), "copies": 1, "po_text": po_text,
+                "confident": True, "reason": "manual range [%d-%d]" % (s_, e_)}
     else:
-        info = analyse(pdf_path, pages, meta["code"], meta["no"])
-    if not info or not info["copy_pages"] or not info["confident"]:
-        result.update(status="manual",
-                      review_reason="Contract page range not detected — add [s-e] to filename or set range.",
-                      msg="تعذّر تحديد صفحات العقد — أضف [s-e] لاسم الملف")
-        audit({"file": fn, "status": "manual", "ocr_confidence": conf,
-               "ocr_language": lang, "manual_review_reason": result["review_reason"]})
+        info = analyse(pdf_path, pages, meta["code"], meta["no"], lang=lang)
+
+    # If detection failed OR OCR confidence is below threshold AND no manual range given,
+    # route to Manual Review (do not silently finalise).
+    if (not info or not info.get("copy_pages") or not info.get("confident")):
+        reason = (info.get("reason") if info else "") or "Contract page range not detected."
+        result.update(status="manual", manual_review_required=True,
+                      review_reason=reason + " Set start/end pages in Manual Review.",
+                      manual_review_reason=reason + " Set start/end pages in Manual Review.",
+                      msg="تعذّر تحديد صفحات العقد — حدّد الصفحات في المراجعة اليدوية")
+        mrq_upsert({"file": fn, "original": os.path.basename(pdf_path), "status": "Needs Manual Review",
+                    "reason": result["manual_review_reason"], "extracted": {},
+                    "missing": ["page_range"], "low_confidence": [],
+                    "code": meta["code"], "no": meta["no"], "annex": meta["annex"],
+                    "range_start": "", "range_end": "", "ocr_confidence": conf})
+        audit({"file": fn, "status": "manual", "ocr_confidence": conf, "ocr_language": lang,
+               "manual_review_reason": result["manual_review_reason"]})
         return result
+
+    copy_pages = info["copy_pages"]
+    result["page_range"] = {"start": copy_pages[0] + 1, "end": copy_pages[-1] + 1,
+                            "count": len(copy_pages), "reason": info.get("reason", "")}
 
     po = parse_po(info["po_text"]) if info["po_text"] else {}
     en = enrich(meta, po)
 
-    # ---- Agreement Date (manual overrides OCR; never blocks) -------------
-    ci, cmy = contract_date(pdf_path, info["copy_pages"][0], lang=lang)
+    # ---- Dynamic field extraction from the SELECTED contract range -------
+    try:
+        xf, range_conf = extract_contract_fields(pdf_path, copy_pages, lang=lang)
+    except Exception:
+        xf, range_conf = {}, 0.0
+
+    # ---- Agreement Date (manual overrides OCR) --------------------------
+    ci, cmy = contract_date(pdf_path, copy_pages[0], lang=lang)
     po_my = ""
     if po.get("po_date"):
         y, m, _ = po["po_date"].split("-"); po_my = f"{MON_ABBR[int(m)]} {y}"
     detected_date = ci
-    agreement_date = (manual_agreement_date or "").strip() or detected_date or po.get("po_date") \
+    agreement_date = (manual.get("agreement_date") or "").strip() or detected_date or po.get("po_date") \
                      or KB.get(f"{meta['code']}|{meta['no']}", {}).get("my", "")
     date_iso = agreement_date or ""
-    # month-year used in the file name / subject
     my = ""
-    if manual_agreement_date:
-        mm = re.search(r"(\d{1,2})\D+(\d{4})", manual_agreement_date) or \
-             re.search(r"(\d{4})\D+(\d{1,2})", manual_agreement_date)
+    if manual.get("agreement_date"):
+        mm = re.search(r"(\d{1,2})\D+(\d{4})", manual["agreement_date"]) or \
+             re.search(r"(\d{4})\D+(\d{1,2})", manual["agreement_date"])
         if mm:
             g = mm.groups()
             month = int(g[0]) if len(g[0]) <= 2 else int(g[1])
@@ -637,64 +901,117 @@ def process_one(pdf_path, lang=None, manual_agreement_date="", manual_sr_number=
             if 1 <= month <= 12: my = f"{MON_ABBR[month]} {year}"
     my = my or cmy or po_my or KB.get(f"{meta['code']}|{meta['no']}", {}).get("my", "")
 
-    # ---- SR Number (manual overrides OCR; never blocks) ------------------
+    # ---- SR Number (manual overrides OCR) -------------------------------
     detected_sr = extract_sr_number(pages)
-    sr_number = (manual_sr_number or "").strip() or detected_sr
+    sr_number = (manual.get("sr_number") or "").strip() or detected_sr
 
-    # ---- missing-field flags & notes -------------------------------------
-    notes = []
-    highlight = []          # 0-based SR Log columns to shade
-    if not date_iso:
-        result["missing"].append("agreement_date")
-        result["warnings"].append("Agreement Date missing / not detected")
-        notes.append("Agreement Date missing / not detected")
-        highlight += [4, 15]     # Create Date, Date
-    if not sr_number:
-        result["missing"].append("sr_number")
-        result["warnings"].append("SR Number missing / not detected")
-        notes.append("SR Number missing / not detected")
-        highlight += [3]         # No.
-    if not po.get("vendor_account"):
-        result["warnings"].append("Vendor account missing")
-        highlight += [10]
-    if po.get("net") is None:
-        result["warnings"].append("Amount not detected")
-        highlight += [16]
+    # ---- resolve each business field: enrichment -> OCR extraction -> manual
+    def pick(manual_key, enriched, ocr_key):
+        mv = (manual.get(manual_key) or "").strip()
+        if mv: return mv, "manual"
+        if enriched: return enriched, "enriched"
+        ov = (xf.get(ocr_key, {}) or {}).get("value", "")
+        if ov: return ov, "ocr"
+        return "", "none"
 
-    # ---- outputs ----------------------------------------------------------
+    vendor_account = (manual.get("vendor_account") or "").strip() or (po.get("vendor_account") or "")
+    company, company_src = pick("company", en.get("arabic_excel") or en.get("veng"), "company")
+    scope, scope_src     = pick("scope", en.get("scope"), "scope")
+    amount_manual = (manual.get("amount") or "").strip()
+    net = None
+    if amount_manual:
+        try: net = float(amount_manual.replace(",", ""))
+        except Exception: net = None
+    if net is None:
+        net = po.get("net")
+    if net is None and xf.get("amount", {}).get("value"):
+        try: net = float(xf["amount"]["value"].replace(",", ""))
+        except Exception: net = None
+    po_no = (manual.get("po_no") or "").strip() or po.get("po_no") or (xf.get("po_no", {}) or {}).get("value", "")
+
+    result["extracted_fields"] = {
+        "company": company, "scope": scope, "vendor_account": vendor_account,
+        "po_no": po_no, "amount": (("%.2f" % net) if net is not None else ""),
+        "agreement_date": date_iso, "sr_number": sr_number,
+        "project": (manual.get("project") or en.get("label") or (xf.get("project", {}) or {}).get("value", "")),
+        "range_conf": range_conf,
+    }
+
+    # ---- missing / low-confidence flags ---------------------------------
+    notes = []; highlight = []
+    def flag_missing(key, label, cols):
+        result["missing_fields"].append(key); result["warnings"].append(label + " missing / not detected")
+        notes.append(label + " missing / not detected"); highlight.extend(cols)
+    if not date_iso:       flag_missing("agreement_date", "Agreement Date", [4, 15])
+    if not sr_number:      flag_missing("sr_number", "SR Number", [3])
+    if not vendor_account: flag_missing("vendor_account", "Vendor account", [10])
+    if net is None:        flag_missing("amount", "Amount", [16])
+    if not company:        flag_missing("company", "Company / supplier", [11])
+    if not scope:          flag_missing("scope", "Scope", [8])
+    # weak OCR overall or per-range
+    if conf and conf < CONF_THRESHOLD:
+        result["low_confidence_fields"].append("ocr_overall")
+    if range_conf and range_conf < CONF_THRESHOLD:
+        result["low_confidence_fields"].append("contract_range_ocr")
+    result["missing"] = result["missing_fields"]   # backward-compat for the Process table
+
+    # ---- outputs (always produced; manual values already merged) ---------
     name = build_name(meta, po, en, my)
-    pdf_out = write_contract_pdf(pdf_path, info["copy_pages"], name)
-    added = append_sr_row(build_row(meta, po, info["copies"], en, date_iso, sr_number,
+    # ensure SR Log uses resolved values even when they came from OCR/manual
+    en2 = dict(en); en2["arabic_excel"] = company or en.get("arabic_excel"); en2["scope"] = scope or en.get("scope")
+    po2 = dict(po); po2["vendor_account"] = vendor_account or po.get("vendor_account"); po2["net"] = net
+    pdf_out = write_contract_pdf(pdf_path, copy_pages, name)
+    added = append_sr_row(build_row(meta, po2, info["copies"], en2, date_iso, sr_number,
                                     note_extra=" | ".join(notes)),
                           highlight_cols=sorted(set(highlight)))
     proj = LABELS.get(meta["code"], en["label"])
-    to, cc = recipients_for(meta["code"], en["scope"])
-    body = email_body(proj, meta["code"], en["veng"], en["scope"], info["copies"])
+    to, cc = recipients_for(meta["code"], scope or en["scope"])
+    body = email_body(proj, meta["code"], company or en["veng"], scope or en["scope"], info["copies"])
     kind, eml = make_draft(name, to, cc, name, body, pdf_out)
 
-    status = "warning" if result["warnings"] else "done"
+    # ---- manual-review record if anything is missing/weak ---------------
+    need_review = bool(result["missing_fields"] or result["low_confidence_fields"])
+    result["manual_review_required"] = need_review
+    if need_review:
+        result["manual_review_reason"] = "Fields need confirmation: " + ", ".join(
+            result["missing_fields"] + result["low_confidence_fields"])
+        mrq_upsert({
+            "file": fn, "original": os.path.basename(pdf_path),
+            "status": "Needs Manual Review",
+            "reason": result["manual_review_reason"],
+            "code": meta["code"], "no": meta["no"], "annex": meta["annex"],
+            "range_start": copy_pages[0] + 1, "range_end": copy_pages[-1] + 1,
+            "ocr_confidence": conf, "range_conf": range_conf,
+            "extracted": result["extracted_fields"],
+            "missing": result["missing_fields"], "low_confidence": result["low_confidence_fields"],
+            "output_pdf": os.path.basename(pdf_out), "eml": os.path.basename(eml) if eml else "",
+        })
+    else:
+        # if it was previously queued and is now clean, mark corrected
+        if mrq_get(fn):
+            mrq_resolve(fn)
+
+    status = "warning" if (result["warnings"] or need_review) else "done"
     result.update(status=status, output_pdf=os.path.basename(pdf_out), eml=eml,
                   sr_added=added, copies=info["copies"],
-                  msg="عقد: %s | نسخ: %d | SR Log: %s | إيميل: %s%s" % (
-                      os.path.basename(pdf_out), info["copies"],
-                      "أُضيف" if added else "موجود", kind,
-                      (" | تنبيهات: " + "؛ ".join(result["warnings"])) if result["warnings"] else ""))
+                  msg="عقد: %s | صفحات: %d-%d (%d) | نسخ: %d | SR Log: %s | إيميل: %s%s" % (
+                      os.path.basename(pdf_out), copy_pages[0] + 1, copy_pages[-1] + 1, len(copy_pages),
+                      info["copies"], "أُضيف" if added else "موجود", kind,
+                      (" | مراجعة: " + "؛ ".join(result["warnings"])) if result["warnings"] else ""))
 
     audit({"file": fn, "output_pdf": result["output_pdf"], "project_code": meta["code"],
            "contract_no": meta["no"], "ocr_language": lang, "ocr_confidence": conf,
-           "detected_agreement_date": detected_date, "manual_agreement_date": manual_agreement_date,
-           "detected_sr_number": detected_sr, "manual_sr_number": manual_sr_number,
-           "missing_fields": result["missing"], "status": status,
+           "page_range": result["page_range"], "extracted_fields": result["extracted_fields"],
+           "detected_agreement_date": detected_date, "manual_agreement_date": manual.get("agreement_date", ""),
+           "detected_sr_number": detected_sr, "manual_sr_number": manual.get("sr_number", ""),
+           "missing_fields": result["missing_fields"], "low_confidence_fields": result["low_confidence_fields"],
+           "manual_review_required": need_review, "status": status,
            "email_draft": eml or kind, "sr_log_output": os.path.join(OUTPUT, NEW_ROWS_NAME)})
-
-    # record manual overrides explicitly
-    if manual_agreement_date and manual_agreement_date != detected_date:
-        audit({"field_changed": "agreement_date", "ocr_value": detected_date,
-               "manual_value": manual_agreement_date, "file": fn})
-    if manual_sr_number and manual_sr_number != detected_sr:
-        audit({"field_changed": "sr_number", "ocr_value": detected_sr,
-               "manual_value": manual_sr_number, "file": fn})
+    for k in ("agreement_date", "sr_number", "vendor_account", "company", "scope", "amount", "po_no"):
+        if manual.get(k):
+            audit({"field_changed": k, "manual_value": manual[k], "file": fn})
     return result
+
 
 def run(log=print, progress=None, on_result=None, lang=None):
     """Batch-process every PDF in Inbox (advanced / legacy folder mode)."""

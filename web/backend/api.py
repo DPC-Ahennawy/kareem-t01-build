@@ -115,6 +115,12 @@ async def process(req: Request):
                     "confidence": r.get("confidence"), "missing": r.get("missing", []),
                     "warnings": r.get("warnings", []), "review_reason": r.get("review_reason", ""),
                     "output_pdf": r.get("output_pdf", ""),
+                    "missing_fields": r.get("missing_fields", []),
+                    "low_confidence_fields": r.get("low_confidence_fields", []),
+                    "manual_review_required": r.get("manual_review_required", False),
+                    "manual_review_reason": r.get("manual_review_reason", ""),
+                    "page_range": r.get("page_range"),
+                    "extracted_fields": r.get("extracted_fields", {}),
                 })
                 STATE["done"] = i
         finally:
@@ -210,14 +216,55 @@ async def save_settings(req: Request):
 # --------------------------------------------------------------------------
 @app.get("/api/pending")
 def pending():
-    p = os.path.join(pc.OUTPUT, "_pending.txt")
-    text = open(p, encoding="utf-8").read() if os.path.exists(p) else ""
-    items = []
-    for line in text.splitlines():
-        if "\t" in line:
-            fn, reason = line.split("\t", 1)
-            items.append({"file": fn, "reason": reason})
-    return {"items": items, "text": text or "لا توجد ملفات معلّقة."}
+    """Back-compat: surface the manual-review queue as a simple item list."""
+    items = [{"file": r.get("file"), "reason": r.get("reason", "")}
+             for r in pc.mrq_list() if r.get("status") != "Corrected"]
+    return {"items": items}
+
+
+# ---- Manual Review (spec ISSUE 1) ----------------------------------------
+MR_FIELDS = ["agreement_date", "sr_number", "po_no", "vendor_account",
+             "company", "scope", "amount", "project", "range_start", "range_end"]
+
+@app.get("/api/manual_review")
+def manual_review():
+    """All files needing correction (missing/weak fields, or undetected range)."""
+    return {"items": pc.mrq_list(), "fields": MR_FIELDS}
+
+@app.post("/api/manual_review/{file_id}/save")
+async def manual_review_save(file_id: str, req: Request):
+    body = await req.json()
+    rec = pc.mrq_get(file_id) or {"file": file_id}
+    rec.setdefault("manual", {})
+    for k in MR_FIELDS:
+        if k in body and body[k] != "":
+            rec["manual"][k] = body[k]
+    rec["status"] = "Saved (not yet reprocessed)"
+    pc.mrq_upsert(rec)
+    return {"ok": True, "record": pc.mrq_get(file_id)}
+
+@app.post("/api/manual_review/{file_id}/reprocess")
+async def manual_review_reprocess(file_id: str, req: Request):
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    fp = os.path.join(pc.INBOX, file_id + ".pdf")
+    if not os.path.exists(fp):
+        # also accept an exact filename passed in
+        cand = os.path.join(pc.INBOX, file_id)
+        fp = cand if os.path.exists(cand) else fp
+    if not os.path.exists(fp):
+        return JSONResponse({"error": "source PDF not found in Inbox: %s.pdf" % file_id}, status_code=404)
+    rec = pc.mrq_get(file_id) or {}
+    manual = dict(rec.get("manual", {}))
+    for k in MR_FIELDS:                      # body overrides saved values
+        if k in body and body[k] != "":
+            manual[k] = body[k]
+    lang = ocr.LANGUAGE_OPTIONS.get(body.get("language", ""), body.get("language")) \
+           or pc.CFG.get("ocr_default_language")
+    r = pc.process_one(fp, lang=lang, manual=manual)
+    return {"ok": True, "result": r, "record": pc.mrq_get(file_id)}
 
 @app.get("/api/history")
 def history():
